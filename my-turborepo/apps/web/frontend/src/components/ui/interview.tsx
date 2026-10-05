@@ -25,7 +25,7 @@ export function Interview() {
   const isPlayingRef = useRef(false);
 
   useEffect(() => {
-    const ws = new WebSocket("ws://localhost:3000/ws");
+    const ws = new WebSocket("wss://intview-production.up.railway.app/ws");
     wsRef.current = ws;
 
     ws.onopen = () => {
