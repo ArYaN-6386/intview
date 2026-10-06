@@ -46,10 +46,11 @@ async function fetchCandidateGitHub(username: string) {
 }
 
 export function Interview() {
-  const [status, setStatus] = useState("Connecting...");
+  const [status, setStatus] = useState("Not Started");
   const [transcript, setTranscript] = useState("");
   const [assistantReply, setAssistantReply] = useState("");
   const [isRecording, setIsRecording] = useState(false);
+  const [started, setStarted] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -57,7 +58,10 @@ export function Interview() {
   const playbackQueueRef = useRef<Array<{ buffer: AudioBuffer, turn: number }>>([]);
   const isPlayingRef = useRef(false);
 
-  useEffect(() => {
+  const handleStart = async () => {
+    setStarted(true);
+    setStatus("Connecting...");
+
     const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:4000/ws";
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
@@ -73,7 +77,6 @@ export function Interview() {
       switch (msg.type) {
         case "ready":
           setStatus("Ready");
-          // In a real app, get username from auth/url. Hardcoded for now.
           const githubData = await fetchCandidateGitHub("aryan");
           ws.send(JSON.stringify({ event: "init", github: githubData }));
           startRecording();
@@ -113,9 +116,11 @@ export function Interview() {
     };
 
     ws.onclose = () => setStatus("Disconnected");
+  };
 
+  useEffect(() => {
     return () => {
-      ws.close();
+      if (wsRef.current) wsRef.current.close();
       if (audioCtxRef.current) audioCtxRef.current.close();
     };
   }, []);
@@ -241,9 +246,15 @@ export function Interview() {
         </div>
 
         <div className="flex justify-center">
-          <Button variant="destructive" onClick={() => window.location.reload()}>
-            End Interview
-          </Button>
+          {!started ? (
+            <Button onClick={handleStart}>
+              Start Interview
+            </Button>
+          ) : (
+            <Button variant="destructive" onClick={() => window.location.reload()}>
+              End Interview
+            </Button>
+          )}
         </div>
       </Card>
     </div>
