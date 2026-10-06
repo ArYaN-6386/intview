@@ -62,7 +62,7 @@ export function Interview() {
     setStarted(true);
     setStatus("Connecting...");
 
-    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:4000/ws";
+    const wsUrl = (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_WS_URL) || "ws://localhost:4000/ws";
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
@@ -77,7 +77,11 @@ export function Interview() {
       switch (msg.type) {
         case "ready":
           setStatus("Ready");
-          const githubData = await fetchCandidateGitHub("aryan");
+          // Use the correct GitHub username
+          const username = "ArYaN-6386";
+          console.log(`Fetching GitHub data for: ${username}`);
+          const githubData = await fetchCandidateGitHub(username);
+          console.log("Fetched GitHub Data:", githubData);
           ws.send(JSON.stringify({ event: "init", github: githubData }));
           startRecording();
           break;
