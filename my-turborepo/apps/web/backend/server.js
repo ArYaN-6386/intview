@@ -1,16 +1,16 @@
-
 // server.js — WebSocket relay: browser ⇄ Sarvam realtime STT ⇄ Ollama ⇄ Bulbul TTS
 //
-//   npm i ws sarvamai          (package.json needs "type": "module")
+//   npm i ws sarvamai dotenv          (package.json needs "type": "module")
 //   SARVAM_API_KEY=... node server.js
 //
 // ── Protocol your frontend implements ───────────────────────────────────────
 //
-// Connect to  ws://HOST:3000/ws
+// Connect to  ws://HOST:4000/ws
 //
 // Client → server (JSON text frames, nothing else is forwarded):
 //   { event: "audio_input", audio: "<base64>" }   16 kHz mono linear16 PCM,
 //                                                 ~100 ms per frame (3200 bytes)
+//   { event: "init", github: <data> }             initialize session with candidate data
 //   { event: "end" }                              graceful close
 //
 // Server → client (JSON):
@@ -32,6 +32,8 @@
 import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { SarvamAIClient } from "sarvamai";
+import dotenv from "dotenv";
+dotenv.config();
 
 const KEY = process.env.SARVAM_API_KEY;
 if (!KEY) throw new Error("set SARVAM_API_KEY");
@@ -57,22 +59,26 @@ const FALLBACK_LANG = "hi-IN";
 // Local Ollama needs no key. For Ollama Cloud, set OLLAMA_HOST + OLLAMA_API_KEY.
 const OLLAMA = {
   url: (process.env.OLLAMA_HOST || "http://localhost:11434") + "/api/chat",
-  model: process.env.OLLAMA_MODEL || "llama3.2:3b",
+  model: process.env.OLLAMA_MODEL || "qwen3.5:latest",
   key: process.env.OLLAMA_API_KEY || null,
 };
 
 function buildSystemPrompt(gh) {
   const data = JSON.stringify(gh).slice(0, 6000);
-  return `You are a technical interviewer. Here is the candidate's GitHub data: ${data}.
-Rules:
-1. Ask ONE question at a time grounded in specific repos, languages, or commits from the data.
-2. Your replies are spoken aloud: max 2 short sentences, no markdown, no lists.
-3. After each answer, either probe deeper (why, trade-offs, what broke) or move to another project.
-4. Never invent repos or facts not in the data.`;
+  console.log("DEBUG: FINAL SYSTEM PROMPT DATA:", data);
+  return `You are a professional Technical Interviewer.
+
+  CRITICAL CONTEXT: The following is the candidate's actual GitHub data. You MUST use this data to personalize the interview.
+  CANDIDATE DATA: ${data}
+
+  INTERVIEW RULES:
+  1. PRIMARY GOAL: Conduct a technical interview based SPECIFICALLY on the projects, languages, and commits in the Candidate Data above.
+  2. STARTING POINT: Your first question must reference a specific project or technology found in the Candidate Data.
+  3. FORMAT: Ask only ONE clear, short question at a time (max 2 sentences).
+  4. NO MARKDOWN: No bolding, lists, or special characters.
+  5. FALLBACK: Only if the data is completely empty should you ask general technical questions.
+  6. FACTUALITY: Do not invent projects. Only use what is provided.`;
 }
-
-
-
 
 const ORIGINS = (process.env.ALLOWED_ORIGINS || "http://localhost:3000").split(",");
 
@@ -130,12 +136,14 @@ wss.on("connection", (client) => {
 
   // --- user said something → think → speak ----------------------------------
   async function reply(text, lang) {
+    console.log(`Reply triggered with text: "${text}"`);
     const mine = ++turn;
     const language_code = lang && lang !== "auto" ? lang : FALLBACK_LANG;
     history.push({ role: "user", content: text });
 
     let answer;
     try {
+      console.log(`Calling Ollama with model ${OLLAMA.model}...`);
       const res = await fetch(OLLAMA.url, {
         method: "POST",
         headers: {
@@ -145,41 +153,49 @@ wss.on("connection", (client) => {
         body: JSON.stringify({
           model: OLLAMA.model,
           stream: false,
-          keep_alive: "10m",                          // keep weights resident between turns
-          options: { temperature: 0.7, num_predict: 120 },
           messages: [{ role: "system", content: sys }, ...history.slice(-10)],
         }),
       });
       if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-      answer = (await res.json()).message.content
-        .replace(/<think>[\s\S]*?<\/think>/g, "")     // reasoning models leak these
+      const json = await res.json();
+      answer = (json.message?.content || "")
+        .replace(/<think>[\s\S]*?<\/think>/g, "")
         .trim();
-      if (!answer) throw new Error("empty completion");
+
+      if (!answer) {
+        console.log("Warning: Ollama returned empty completion. Using fallback.");
+        answer = "Hello! I've reviewed your GitHub profile. Could you start by telling me about your most favorite project?";
+      }
+      console.log(`Ollama answered: "${answer}"`);
     } catch (e) {
+      console.error("Ollama Error:", e);
       return toClient({ type: "error", message: "ollama failed: " + e.message });
     }
-    if (mine !== turn) return;                // user interrupted while we thought
+    if (mine !== turn) {
+      console.log("Reply discarded: user interrupted (turn mismatch)");
+      return;
+    }
     history.push({ role: "assistant", content: answer });
     toClient({ type: "reply", text: answer });
 
-    // Synthesize sentence by sentence so playback starts early.
-    // REST TTS caps at 2500 chars per call anyway.
     for (const chunk of split(answer)) {
       if (mine !== turn) return;
       try {
+        console.log(`Synthesizing chunk: "${chunk}"`);
         const res = await sarvam.textToSpeech.convert({
           text: chunk,
           target_language_code: language_code,
           ...VOICE
         });
         if (mine !== turn) return;
-        // `audios` is base64; the client decodes it
         toClient({ type: "audio", b64: res.audios.join(""), turn: mine });
       } catch (e) {
+        console.error("TTS Error:", e);
         return toClient({ type: "error", message: "tts failed: " + e.message });
       }
     }
     toClient({ type: "audio_end", turn: mine });
+    console.log("Reply cycle complete.");
   }
 
   // --- browser → upstream ----------------------------------------------------
@@ -189,8 +205,10 @@ wss.on("connection", (client) => {
     try { m = JSON.parse(raw.toString()); } catch { return; }
 
     if (m.event === "init") {
+      console.log("Received init event for GitHub data:", m.github);
       sys = buildSystemPrompt(m.github);
-      reply("Begin the interview with a brief greeting and your first question.", FALLBACK_LANG);
+      console.log("System prompt built. Triggering first reply...");
+      reply("Analyze the provided candidate data and begin the interview with a greeting and a specific question about one of their projects.", FALLBACK_LANG);
       return;
     }
 
