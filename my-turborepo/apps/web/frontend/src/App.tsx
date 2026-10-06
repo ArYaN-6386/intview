@@ -16,7 +16,7 @@ export function App() {
       <div className="flex flex-col gap-4 w-full max-w-sm px-4">
         <h1 className="text-2xl font-bold text-center mb-4">Interview kickstart</h1>
         <Input placeholder="Name" />
-        <Input placeholder="Email" type="email" />
+        <Input placeholder="Github" type="url" />
         <Button onClick={() => setIsInterviewStarted(true)}>Start Interview</Button>
       </div>
     </div>
