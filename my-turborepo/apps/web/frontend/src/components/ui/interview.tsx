@@ -12,6 +12,39 @@ interface Message {
   code?: number;
 }
 
+async function fetchCandidateGitHub(username: string) {
+  try {
+    const res = await fetch(`https://api.github.com/users/${username}/repos?per_page=10&sort=updated`);
+    if (!res.ok) throw new Error("GitHub API error");
+    const repos = await res.json();
+
+    const detailedRepos = await Promise.all(repos.slice(0, 5).map(async (repo: any) => {
+      try {
+        const readmeRes = await fetch(repo.readme_url);
+        const readme = readmeRes.ok ? await readmeRes.text() : "";
+        return {
+          ...repo,
+          readme: readme.slice(0, 1500)
+        };
+      } catch {
+        return repo;
+      }
+    }));
+
+    return detailedRepos.map(r => ({
+      name: r.name,
+      description: r.description,
+      language: r.language,
+      topics: r.topics,
+      stars: r.stargazers_count,
+      readme: r.readme
+    }));
+  } catch (err) {
+    console.error("GitHub fetch error:", err);
+    return [];
+  }
+}
+
 export function Interview() {
   const [status, setStatus] = useState("Connecting...");
   const [transcript, setTranscript] = useState("");
@@ -25,7 +58,8 @@ export function Interview() {
   const isPlayingRef = useRef(false);
 
   useEffect(() => {
-    const ws = new WebSocket("wss://intview-production.up.railway.app/ws");
+    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:4000/ws";
+    const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -39,6 +73,9 @@ export function Interview() {
       switch (msg.type) {
         case "ready":
           setStatus("Ready");
+          // In a real app, get username from auth/url. Hardcoded for now.
+          const githubData = await fetchCandidateGitHub("aryan");
+          ws.send(JSON.stringify({ event: "init", github: githubData }));
           startRecording();
           break;
         case "barge_in":
@@ -65,6 +102,12 @@ export function Interview() {
           break;
         case "error":
           setStatus(`Error: ${msg.message}`);
+          break;
+        case "billed":
+          console.log(`Billed duration: ${msg.seconds}s`);
+          break;
+        case "closed":
+          setStatus("Closed");
           break;
       }
     };
@@ -145,6 +188,8 @@ export function Interview() {
   const stopPlayback = () => {
     playbackQueueRef.current = [];
     // In a real app, we'd need to stop the currently active AudioBufferSourceNode
+    // For now, we'll just clear the queue and let the current chunk finish or
+    // implement a more robust stop mechanism.
   };
 
   const floatToInt16 = (float32Array: Float32Array) => {

@@ -40,7 +40,7 @@ const sarvam = new SarvamAIClient({ apiSubscriptionKey: KEY });
 
 // Tune these three for conversational feel.
 const STT = {
-  model: "saaras:v4",
+  model: process.env.SARVAM_STT_MODEL || "saaras:v3-realtime",
   language_code: "auto",        // or "hi-IN", "en-IN", ...
   stream_type: "fast",          // snappiest partials; "balanced" is the default
   mode: "transcribe",
@@ -61,18 +61,30 @@ const OLLAMA = {
   key: process.env.OLLAMA_API_KEY || null,
 };
 
-const SYS = process.env.SYSTEM_PROMPT;
+function buildSystemPrompt(gh) {
+  const data = JSON.stringify(gh).slice(0, 6000);
+  return `You are a technical interviewer. Here is the candidate's GitHub data: ${data}.
+Rules:
+1. Ask ONE question at a time grounded in specific repos, languages, or commits from the data.
+2. Your replies are spoken aloud: max 2 short sentences, no markdown, no lists.
+3. After each answer, either probe deeper (why, trade-offs, what broke) or move to another project.
+4. Never invent repos or facts not in the data.`;
+}
 
 
+
+
+const ORIGINS = (process.env.ALLOWED_ORIGINS || "http://localhost:3000").split(",");
 
 const server = http.createServer((_, res) => res.writeHead(404).end());
 const wss = new WebSocketServer({
   server,
   path: "/ws",
-  verifyClient: ({ origin }) => !origin || (typeof ORIGINS !== 'undefined' && ORIGINS.includes(origin)),
+  verifyClient: ({ origin }) => !origin || ORIGINS.includes(origin),
 });
 
 wss.on("connection", (client) => {
+  let sys = process.env.SYSTEM_PROMPT || "You are a helpful technical interviewer.";
   const url = "wss://api.sarvam.ai/speech-to-text-realtime/ws?" + new URLSearchParams(STT);
   const up = new WebSocket(url, { headers: { "api-subscription-key": KEY } });
 
@@ -135,7 +147,7 @@ wss.on("connection", (client) => {
           stream: false,
           keep_alive: "10m",                          // keep weights resident between turns
           options: { temperature: 0.7, num_predict: 120 },
-          messages: [{ role: "system", content: SYS }, ...history.slice(-10)],
+          messages: [{ role: "system", content: sys }, ...history.slice(-10)],
         }),
       });
       if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
@@ -155,7 +167,11 @@ wss.on("connection", (client) => {
     for (const chunk of split(answer)) {
       if (mine !== turn) return;
       try {
-        const res = await sarvam.textToSpeech.convert({ text: chunk, language_code, ...VOICE });
+        const res = await sarvam.textToSpeech.convert({
+          text: chunk,
+          target_language_code: language_code,
+          ...VOICE
+        });
         if (mine !== turn) return;
         // `audios` is base64; the client decodes it
         toClient({ type: "audio", b64: res.audios.join(""), turn: mine });
@@ -171,6 +187,13 @@ wss.on("connection", (client) => {
     if (isBinary) return;
     let m;
     try { m = JSON.parse(raw.toString()); } catch { return; }
+
+    if (m.event === "init") {
+      sys = buildSystemPrompt(m.github);
+      reply("Begin the interview with a brief greeting and your first question.", FALLBACK_LANG);
+      return;
+    }
+
     if (m.event !== "audio_input" && m.event !== "end") return;   // don't proxy arbitrary frames
     const frame = JSON.stringify(m);
     up.readyState === WebSocket.OPEN ? up.send(frame) : pending.push(frame);
@@ -188,4 +211,5 @@ wss.on("connection", (client) => {
 
 const split = (s) => s.match(/[^.!?।]+[.!?।]*\s*/g)?.filter((x) => x.trim()) ?? [s];
 
-server.listen(3000, () => console.log("ws://localhost:3000/ws"));
+const PORT = process.env.PORT || 4000;
+server.listen(PORT, () => console.log(`ws://localhost:${PORT}/ws`));
